@@ -1,7 +1,9 @@
 #!/bin/bash
 # =====================================================
-# 高仿自动引流助手（纯自动 · 后台守护版）
-# 入口 / 高仿 通用
+# UDP 隧道 自动引流助手（入口 / 高仿 通用）
+# 逻辑：
+# - 使用 socat 的 TUN+UDP 做 L3 隧道
+# - 入口机按带宽阈值自动把入口 IP 流量通过隧道打到高仿
 # =====================================================
 
 # 颜色
@@ -13,25 +15,27 @@ GREEN='\033[38;5;82m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-# 会话变量（仅当前进程 / 守护进程内）
-ENTRY_IP=""       # 入口IP（被攻击那个）
-GF_IP=""          # 高仿IP
+# 参数（只在当前进程 / 守护进程里）
+ENTRY_IP=""       # 入口 IP（被攻击入口）
+GF_IP=""          # 高仿 IP
 ROLE=""           # entry / gf
-LOCAL_WAN_IP=""   # 本机公网IP
-REMOTE_WAN_IP=""  # 对端公网IP
+LOCAL_WAN_IP=""   # 本机公网 IP
+REMOTE_WAN_IP=""  # 对端公网 IP
 
 TUN_NAME="gf_tun0"
-LOCAL_TUN_IP=""
-REMOTE_TUN_IP=""
+LOCAL_TUN_IP="10.254.0.1"
+REMOTE_TUN_IP="10.254.0.2"
+UDP_PORT="40000"
 
 TABLE_ID="200"
 TABLE_NAME="gf_route"
 
 NET_IF=""         # 对外网卡
-THRESHOLD_G="1"   # 默认触发阈值 1 Gbps
+THRESHOLD_G="1"  # 默认 1 Gbps
 
-PID_FILE="/var/run/gf_auto_daemon.pid"
-LOG_FILE="/var/log/gf_auto_daemon.log"
+PID_FILE="/var/run/gf_udp_auto_daemon.pid"
+TUN_SVC_PID="/var/run/gf_udp_tun.pid"
+LOG_FILE="/var/log/gf_udp_auto_daemon.log"
 
 require_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -48,77 +52,8 @@ auto_detect_ip() {
     ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}'
 }
 
-ip2int() {
-    local IFS=.
-    read -r a b c d <<< "$1"
-    echo $(( (a<<24) + (b<<16) + (c<<8) + d ))
-}
-
-int2ip() {
-    local ip dec=$1
-    for _ in {1..4}; do
-        ip=$((dec & 255))${ip:+.}$ip
-        dec=$((dec >> 8))
-    done
-    echo "$ip"
-}
-
-# 基于入口IP/高仿IP生成隧道IP（10.253.x.y/30）
-calc_tunnel_ips() {
-    local ip1="$ENTRY_IP"
-    local ip2="$GF_IP"
-
-    local int1 int2 min_ip max_ip
-    int1=$(ip2int "$ip1")
-    int2=$(ip2int "$ip2")
-
-    if [ "$int1" -le "$int2" ]; then
-        min_ip="$ip1"
-        max_ip="$ip2"
-    else
-        min_ip="$ip2"
-        max_ip="$ip1"
-    fi
-
-    local IFS=.
-    read -r a b c d <<< "$min_ip"
-
-    local x=$(( (c + d*3) % 250 ))
-    local y=$(( (d*7) % 252 ))   # /30 对齐
-
-    local net_int=$(( (10<<24) + (253<<16) + (x<<8) + y ))
-    local host1_int=$((net_int + 1))
-    local host2_int=$((net_int + 2))
-
-    local host1_ip host2_ip
-    host1_ip=$(int2ip "$host1_int")
-    host2_ip=$(int2ip "$host2_int")
-
-    local intEntry intGf
-    intEntry=$(ip2int "$ENTRY_IP")
-    intGf=$(ip2int "$GF_IP")
-
-    if [ "$intEntry" -le "$intGf" ]; then
-        if [ "$ROLE" = "entry" ]; then
-            LOCAL_TUN_IP="$host1_ip"
-            REMOTE_TUN_IP="$host2_ip"
-        else
-            LOCAL_TUN_IP="$host2_ip"
-            REMOTE_TUN_IP="$host1_ip"
-        fi
-    else
-        if [ "$ROLE" = "entry" ]; then
-            LOCAL_TUN_IP="$host2_ip"
-            REMOTE_TUN_IP="$host1_ip"
-        else
-            LOCAL_TUN_IP="$host1_ip"
-            REMOTE_TUN_IP="$host2_ip"
-        fi
-    fi
-}
-
 config_session() {
-    echo -e "${GOLD}━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━${RESET}"
+    echo -e "${GOLD}━━━━━━━━━━ UDP 隧道 DDoS 控制台 ━━━━━━━━━━${RESET}"
     echo -e "${CYAN}${BOLD}             会话参数设置${RESET}"
     echo
 
@@ -154,12 +89,14 @@ config_session() {
     if [ "$ROLE" = "entry" ]; then
         LOCAL_WAN_IP="$MY_IP"
         REMOTE_WAN_IP="$GF_IP"
+        LOCAL_TUN_IP="10.254.0.1"
+        REMOTE_TUN_IP="10.254.0.2"
     else
         LOCAL_WAN_IP="$MY_IP"
         REMOTE_WAN_IP="$ENTRY_IP"
+        LOCAL_TUN_IP="10.254.0.2"
+        REMOTE_TUN_IP="10.254.0.1"
     fi
-
-    calc_tunnel_ips
 
     echo
     echo -e "${GOLD}当前会话配置${RESET}"
@@ -171,6 +108,7 @@ config_session() {
     echo -e "  隧道名称:     ${CYAN}$TUN_NAME${RESET}"
     echo -e "  本机隧道IP:   ${CYAN}$LOCAL_TUN_IP${RESET}"
     echo -e "  对端隧道IP:   ${CYAN}$REMOTE_TUN_IP${RESET}"
+    echo -e "  UDP 端口:     ${CYAN}$UDP_PORT${RESET}"
     echo -e "  路由表:       ${CYAN}$TABLE_ID $TABLE_NAME${RESET}"
     echo -e "  阈值:         ${CYAN}${THRESHOLD_G} Gbps${RESET}"
     echo
@@ -183,44 +121,79 @@ check_base() {
         pause
         return 1
     fi
-    if [ -z "$LOCAL_WAN_IP" ] || [ -z "$REMOTE_WAN_IP" ] || [ -z "$LOCAL_TUN_IP" ] || [ -z "$REMOTE_TUN_IP" ]; then
-        echo -e "${RED}[-] 隧道参数未就绪，请重新执行菜单 1${RESET}"
-        pause
-        return 1
+    return 0
+}
+
+install_socat_if_needed() {
+    if ! command -v socat >/dev/null 2>&1; then
+        echo -e "${GRAY}[*] 未检测到 socat，尝试安装...${RESET}"
+        if command -v apt >/dev/null 2>&1; then
+            apt update -y && apt install -y socat
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y socat
+        else
+            echo -e "${RED}[-] 无法自动安装 socat，请手动安装后重试${RESET}"
+            pause
+            return 1
+        fi
     fi
     return 0
 }
 
-init_tunnel() {
+start_udp_tunnel() {
     check_base || return
+    install_socat_if_needed || return
 
-    echo -e "${GRAY}[*] 加载 GRE 模块...${RESET}"
-    modprobe ip_gre 2>/dev/null || true
+    # 停掉旧的
+    if [ -f "$TUN_SVC_PID" ] && kill -0 "$(cat "$TUN_SVC_PID")" 2>/dev/null; then
+        kill "$(cat "$TUN_SVC_PID")" 2>/dev/null
+        rm -f "$TUN_SVC_PID"
+        sleep 1
+    fi
 
-    echo -e "${GRAY}[*] 清理旧隧道: ${TUN_NAME}${RESET}"
-    ip tunnel del "$TUN_NAME" 2>/dev/null
+    echo -e "${GRAY}[*] 启动 UDP 隧道（TUN+UDP）${RESET}"
 
-    echo -e "${GRAY}[*] 创建隧道 ${TUN_NAME}（本机: $LOCAL_WAN_IP → 对端: $REMOTE_WAN_IP）${RESET}"
-    ip tunnel add "$TUN_NAME" mode gre local "$LOCAL_WAN_IP" remote "$REMOTE_WAN_IP" ttl 255
+    if [ "$ROLE" = "gf" ]; then
+        # 高仿：监听 UDP
+        # TUN 名称指定为 gf_tun0，地址为 LOCAL_TUN_IP/30
+        nohup socat TUN:"$TUN_NAME",tun-type=tun,iff-up,up,iff-no-pi,addr="$LOCAL_TUN_IP",peer="$REMOTE_TUN_IP"/30 \
+              UDP-LISTEN:"$UDP_PORT",fork,reuseaddr >/var/log/gf_udp_tun.log 2>&1 &
+    else
+        # 入口：主动连高仿
+        nohup socat TUN:"$TUN_NAME",tun-type=tun,iff-up,up,iff-no-pi,addr="$LOCAL_TUN_IP",peer="$REMOTE_TUN_IP"/30 \
+              UDP:"$REMOTE_WAN_IP":"$UDP_PORT" >/var/log/gf_udp_tun.log 2>&1 &
+    fi
 
-    echo -e "${GRAY}[*] 配置本机隧道IP: ${LOCAL_TUN_IP}/30${RESET}"
-    ip addr flush dev "$TUN_NAME" 2>/dev/null
-    ip addr add "$LOCAL_TUN_IP"/30 dev "$TUN_NAME"
+    local PID=$!
+    echo "$PID" > "$TUN_SVC_PID"
 
-    echo -e "${GRAY}[*] 启用隧道网卡${RESET}"
-    ip link set "$TUN_NAME" up
+    # 等 TUN 起来
+    sleep 2
 
-    echo -e "${GRAY}[*] 检查/添加路由表: $TABLE_ID $TABLE_NAME${RESET}"
-    if ! grep -qE "^[[:space:]]*$TABLE_ID[[:space:]]+$TABLE_NAME" /etc/iproute2/rt_tables; then
+    # 添加路由表定义
+    if ! grep -qE "^[[:space:]]*$TABLE_ID[[:space:]]+$TABLE_NAME" /etc/iproute2/rt_tables 2>/dev/null; then
         echo "$TABLE_ID $TABLE_NAME" >> /etc/iproute2/rt_tables
     fi
 
-    echo -e "${GRAY}[*] 配置 $TABLE_NAME 表默认走隧道${RESET}"
+    # 表默认走隧道
     ip route flush table "$TABLE_NAME" 2>/dev/null
     ip route add default dev "$TUN_NAME" table "$TABLE_NAME"
 
-    echo
-    echo -e "${GREEN}[+] 隧道已初始化${RESET}"
+    echo -e "${GREEN}[+] UDP 隧道已启动，TUN=${TUN_NAME}，本机隧道IP=${LOCAL_TUN_IP}${RESET}"
+    echo -e "${GRAY}可以相互 ping 隧道 IP 检查连通：${LOCAL_TUN_IP} ↔ ${REMOTE_TUN_IP}${RESET}"
+    pause
+}
+
+stop_udp_tunnel() {
+    echo -e "${GRAY}[*] 停止 UDP 隧道${RESET}"
+    if [ -f "$TUN_SVC_PID" ] && kill -0 "$(cat "$TUN_SVC_PID")" 2>/dev/null; then
+        kill "$(cat "$TUN_SVC_PID")" 2>/dev/null
+        rm -f "$TUN_SVC_PID"
+    fi
+    ip link set "$TUN_NAME" down 2>/dev/null || true
+    ip link del "$TUN_NAME" 2>/dev/null || true
+    ip route flush table "$TABLE_NAME" 2>/dev/null
+    echo -e "${GREEN}[+] 隧道进程和路由已清理${RESET}"
     pause
 }
 
@@ -241,20 +214,33 @@ show_status() {
     echo -e "  高仿IP:       ${CYAN}${GF_IP:-"(未设置)"}${RESET}"
     echo -e "  本机公网IP:   ${CYAN}${LOCAL_WAN_IP:-"(未设置)"}${RESET}"
     echo -e "  对端公网IP:   ${CYAN}${REMOTE_WAN_IP:-"(未设置)"}${RESET}"
-    echo -e "  隧道名称:     ${CYAN}${TUN_NAME}${RESET}"
-    echo -e "  本机隧道IP:   ${CYAN}${LOCAL_TUN_IP:-"(未生成)"}${RESET}"
-    echo -e "  对端隧道IP:   ${CYAN}${REMOTE_TUN_IP:-"(未生成)"}${RESET}"
+    echo -e "  隧道名称:     ${CYAN}$TUN_NAME${RESET}"
+    echo -e "  本机隧道IP:   ${CYAN}${LOCAL_TUN_IP:-"(未设置)"}${RESET}"
+    echo -e "  对端隧道IP:   ${CYAN}${REMOTE_TUN_IP:-"(未设置)"}${RESET}"
+    echo -e "  UDP 端口:     ${CYAN}${UDP_PORT}${RESET}"
     echo -e "  路由表:       ${CYAN}${TABLE_ID} ${TABLE_NAME}${RESET}"
     echo -e "  监控网卡:     ${CYAN}${NET_IF:-"(未设置)"}${RESET}"
     echo -e "  阈值(Gbps):   ${CYAN}${THRESHOLD_G}${RESET}"
-
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
         echo -e "  守护进程:     ${GREEN}运行中 (PID $(cat "$PID_FILE"))${RESET}"
     else
         echo -e "  守护进程:     ${RED}未运行${RESET}"
     fi
-
+    if [ -f "$TUN_SVC_PID" ] && kill -0 "$(cat "$TUN_SVC_PID")" 2>/dev/null; then
+        echo -e "  UDP 隧道:     ${GREEN}运行中 (PID $(cat "$TUN_SVC_PID"))${RESET}"
+    else
+        echo -e "  UDP 隧道:     ${RED}未运行${RESET}"
+    fi
     echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo
+    echo -e "${GRAY}[*] ip addr show dev ${TUN_NAME}:${RESET}"
+    ip addr show dev "$TUN_NAME" 2>/dev/null || echo "  ${TUN_NAME} 未创建"
+    echo
+    echo -e "${GRAY}[*] ip rule | grep ${TABLE_NAME}:${RESET}"
+    ip rule | grep "$TABLE_NAME" || echo "  没有使用 ${TABLE_NAME} 的规则"
+    echo
+    echo -e "${GRAY}[*] ip route show table ${TABLE_NAME}:${RESET}"
+    ip route show table "$TABLE_NAME" || echo "  路由表 ${TABLE_NAME} 为空"
     echo
     pause
 }
@@ -282,7 +268,6 @@ auto_loop() {
         echo "[$(date '+%F %T')] iface=$NET_IF in=${MBPS}Mbps" >> "$LOG_FILE"
 
         if [ "$MBPS" -ge "$THRESHOLD_MBPS" ]; then
-            # 超阈值：如果还没引流，则引流
             if [ "$activated" -eq 0 ]; then
                 echo "[$(date '+%F %T')] threshold hit, enable redirect for $TARGET" >> "$LOG_FILE"
                 enable_redirect
@@ -290,10 +275,8 @@ auto_loop() {
             fi
             below_count=0
         else
-            # 低于阈值：如果当前是引流状态，累计“低负载次数”
             if [ "$activated" -eq 1 ]; then
                 below_count=$((below_count + 1))
-                # 连续 6 次（大约 60s）低于阈值则自动关闭引流
                 if [ "$below_count" -ge 6 ]; then
                     echo "[$(date '+%F %T')] traffic back to normal, disable redirect for $TARGET" >> "$LOG_FILE"
                     disable_redirect
@@ -307,6 +290,12 @@ auto_loop() {
 
 start_daemon() {
     check_base || return
+
+    if [ "$ROLE" != "entry" ]; then
+        echo -e "${RED}[-] 自动引流守护进程只需要在入口服务器上运行${RESET}"
+        pause
+        return
+    fi
 
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
         echo -e "${GREEN}[+] 守护进程已在运行 (PID $(cat "$PID_FILE"))${RESET}"
@@ -331,7 +320,7 @@ start_daemon() {
         return
     fi
 
-    echo -e "${GRAY}[*] 启动自动守护进程，日志输出到 ${LOG_FILE}${RESET}"
+    echo -e "${GRAY}[*] 启动自动守护进程，日志：${LOG_FILE}${RESET}"
     ( auto_loop ) >>"$LOG_FILE" 2>&1 &
     local PID=$!
     echo "$PID" > "$PID_FILE"
@@ -357,6 +346,7 @@ uninstall_all() {
     echo -e "${GOLD}━━━━━━━━━━ 卸载 / 清理 ━━━━━━━━━━${RESET}"
 
     stop_daemon
+    stop_udp_tunnel
 
     echo -e "${GRAY}[*] 删除相关策略路由规则...${RESET}"
     if ip rule | grep -q "$TABLE_NAME"; then
@@ -368,9 +358,6 @@ uninstall_all() {
     echo -e "${GRAY}[*] 清空路由表 ${TABLE_NAME}...${RESET}"
     ip route flush table "$TABLE_NAME" 2>/dev/null
 
-    echo -e "${GRAY}[*] 删除隧道 ${TUN_NAME}...${RESET}"
-    ip tunnel del "$TUN_NAME" 2>/dev/null
-
     if [ -f /etc/iproute2/rt_tables ]; then
         echo -e "${GRAY}[*] 移除 /etc/iproute2/rt_tables 中的标记...${RESET}"
         sed -i "/[[:space:]]$TABLE_ID[[:space:]]$TABLE_NAME/d" /etc/iproute2/rt_tables
@@ -378,19 +365,19 @@ uninstall_all() {
 
     echo
     echo -e "${GREEN}[+] 已清理隧道、路由表和守护进程${RESET}"
-    echo -e "${GRAY}如需删除脚本文件，可执行：rm -f gaofang_auto.sh${RESET}"
+    echo -e "${GRAY}如需删除脚本文件，可执行：rm -f nos_udp_auto.sh${RESET}"
     pause
 }
 
 menu() {
     while true; do
         clear
-        echo -e "${GOLD}━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━${RESET}"
+        echo -e "${GOLD}━━━━━━━━━━ UDP 隧道 DDoS 控制台 ━━━━━━━━━━${RESET}"
         echo -e "${CYAN}${BOLD}             自动引流模式${RESET}"
         echo -e "${GOLD}────────────────────────────────────${RESET}"
         echo -e "  ${GOLD}1${RESET}）设置会话参数"
-        echo -e "  ${GOLD}2${RESET}）建立 / 重建隧道"
-        echo -e "  ${GOLD}3${RESET}）启动自动守护 / 停止守护"
+        echo -e "  ${GOLD}2${RESET}）启动 / 停止 UDP 隧道"
+        echo -e "  ${GOLD}3${RESET}）启动自动守护 / 停止守护（入口机）"
         echo -e "  ${GOLD}4${RESET}）查看当前状态"
         echo -e "  ${GOLD}5${RESET}）卸载 / 清理"
         echo -e "  ${GOLD}0${RESET}）退出"
@@ -399,7 +386,13 @@ menu() {
 
         case "$CH" in
             1) config_session ;;
-            2) init_tunnel ;;
+            2)
+                if [ -f "$TUN_SVC_PID" ] && kill -0 "$(cat "$TUN_SVC_PID")" 2>/dev/null; then
+                    stop_udp_tunnel
+                else
+                    start_udp_tunnel
+                fi
+                ;;
             3)
                 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
                     stop_daemon
