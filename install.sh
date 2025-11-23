@@ -1,22 +1,22 @@
 #!/bin/bash
 # =====================================================
-# 高仿一键助手（单脚本版）
-# 功能：
-#   - 配置：入口IP / 高仿IP / 本机身份 / 网卡 / 阈值(Gbps)
-#   - 自动生成隧道IP & 路由表
-#   - 一键建立/重建 GRE 隧道
-#   - 手动：让某个入口IP 走高仿清洗 / 停止清洗
-#   - 自动：按网卡流量阈值(Gbps)把入口IP打到高仿
-#
-# 特点：
-#   - 不写任何配置文件，不在脚本里暴露真实IP
-#   - 多个入口配一个高仿：每台入口服务器都用这个脚本即可
+# 高仿一键助手（单脚本版 · Black&Gold · Enjoy）
+# 入口 / 高仿 通用
 # =====================================================
 
-# 会话变量（只在脚本进程里存在）
-ENTRY_IP=""       # 入口IP（被打的那个公网IP）
-GF_IP=""          # 高仿IP（高防服务器公网IP）
-ROLE=""           # self role: entry / gf
+# 颜色（黑金风格）
+GOLD='\033[38;5;220m'
+CYAN='\033[38;5;44m'
+GRAY='\033[38;5;245m'
+RED='\033[38;5;196m'
+GREEN='\033[38;5;82m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# 会话变量（只在当前进程存在，不落盘）
+ENTRY_IP=""       # 入口IP（被攻击那个）
+GF_IP=""          # 高仿IP
+ROLE=""           # 本机身份：entry / gf
 LOCAL_WAN_IP=""   # 本机公网IP
 REMOTE_WAN_IP=""  # 对端公网IP
 
@@ -27,33 +27,30 @@ REMOTE_TUN_IP=""
 TABLE_ID="200"
 TABLE_NAME="gf_route"
 
-NET_IF=""         # 用来统计带宽的网卡
-THRESHOLD_G=""    # 触发清洗的阈值（Gbps，整数）
+NET_IF=""         # 对外网卡
+THRESHOLD_G=""    # 触发清洗阈值（Gbps）
 
 require_root() {
     if [ "$EUID" -ne 0 ]; then
-        echo "[-] 请用 root 权限运行此脚本（sudo / root）"
+        echo -e "${RED}[-] 请使用 root 权限运行（sudo / su）。${RESET}"
         exit 1
     fi
 }
 
 pause() {
-    read -rp "按回车继续..." _
+    read -rp "$(echo -e "${GRAY}按回车继续 · Enjoy clean traffic...${RESET}")" _
 }
 
-# 自动探测本机出网IP
 auto_detect_ip() {
     ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}'
 }
 
-# IPv4 -> int
 ip2int() {
     local IFS=.
     read -r a b c d <<< "$1"
     echo $(( (a<<24) + (b<<16) + (c<<8) + d ))
 }
 
-# int -> IPv4
 int2ip() {
     local ip dec=$1
     for _ in {1..4}; do
@@ -63,7 +60,7 @@ int2ip() {
     echo "$ip"
 }
 
-# 根据 ENTRY_IP / GF_IP 自动生成一条 10.253.x.y/30 的隧道网段
+# 基于 入口IP / 高仿IP 自动生成一个 10.253.x.y/30 隧道网段
 calc_tunnel_ips() {
     local ip1="$ENTRY_IP"
     local ip2="$GF_IP"
@@ -83,9 +80,8 @@ calc_tunnel_ips() {
     local IFS=.
     read -r a b c d <<< "$min_ip"
 
-    # 随机一点但可复现：同一对 入口IP/高仿IP 算出同一隧道网段
     local x=$(( (c + d*3) % 250 ))   # 0-249
-    local y=$(( (d*7) % 252 ))       # 0,4,8,...252 (/30 对齐)
+    local y=$(( (d*7) % 252 ))       # /30 对齐
 
     local net_int=$(( (10<<24) + (253<<16) + (x<<8) + y ))
     local host1_int=$((net_int + 1))
@@ -95,14 +91,11 @@ calc_tunnel_ips() {
     host1_ip=$(int2ip "$host1_int")
     host2_ip=$(int2ip "$host2_int")
 
-    # 规则：较小的公网IP 对应隧道 host1，大的对应 host2
-    # ENTRY_IP / GF_IP 谁小谁拿 host1，这样两边脚本结果永远一致
     local intEntry intGf
     intEntry=$(ip2int "$ENTRY_IP")
     intGf=$(ip2int "$GF_IP")
 
     if [ "$intEntry" -le "$intGf" ]; then
-        # ENTRY = host1, GF = host2
         if [ "$ROLE" = "entry" ]; then
             LOCAL_TUN_IP="$host1_ip"
             REMOTE_TUN_IP="$host2_ip"
@@ -111,7 +104,6 @@ calc_tunnel_ips() {
             REMOTE_TUN_IP="$host1_ip"
         fi
     else
-        # ENTRY = host2, GF = host1
         if [ "$ROLE" = "entry" ]; then
             LOCAL_TUN_IP="$host2_ip"
             REMOTE_TUN_IP="$host1_ip"
@@ -123,37 +115,36 @@ calc_tunnel_ips() {
 }
 
 config_session() {
-    echo "============== 本次会话参数 =============="
+    echo -e "${GOLD}━━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━━${RESET}"
+    echo -e "${CYAN}${BOLD}           会话参数设置${RESET}"
+    echo
 
-    echo "本机身份？"
-    echo "  1) 入口服务器（对外那台，被打）"
-    echo "  2) 高仿服务器（高防那台，负责清洗）"
-    read -rp "请选择 1 或 2: " r
+    echo -e "${CYAN}本机身份？${RESET}"
+    echo -e "  ${GOLD}1${RESET}）入口服务器  ${GRAY}(对外那台，可能被打)${RESET}"
+    echo -e "  ${GOLD}2${RESET}）高仿服务器  ${GRAY}(高防那台，负责清洗)${RESET}"
+    read -rp "$(echo -e "${CYAN}请选择 1 或 2: ${RESET}")" r
     case "$r" in
         1) ROLE="entry" ;;
         2) ROLE="gf" ;;
-        *) echo "[-] 选择无效"; pause; return ;;
+        *) echo -e "${RED}[-] 选择无效。${RESET}"; pause; return ;;
     esac
 
-    # 入口IP
-    read -rp "入口IP（被攻击的那个公网IP）: " ENTRY_IP
-    # 高仿IP
-    read -rp "高仿IP（高防服务器公网IP）: " GF_IP
+    read -rp "$(echo -e "${CYAN}入口IP（被攻击那个公网IP）: ${RESET}")" ENTRY_IP
+    read -rp "$(echo -e "${CYAN}高仿IP（高防服务器公网IP）: ${RESET}")" GF_IP
 
     if [ -z "$ENTRY_IP" ] || [ -z "$GF_IP" ]; then
-        echo "[-] 入口IP / 高仿IP 不能为空。"
+        echo -e "${RED}[-] 入口IP / 高仿IP 不能为空。${RESET}"
         pause
         return
     fi
 
-    # 本机公网IP（自动探测 + 手动确认）
     AUTO_IP=$(auto_detect_ip)
     if [ -n "$AUTO_IP" ]; then
-        echo "自动检测到本机出网IP：$AUTO_IP"
-        read -rp "本机公网IP（回车使用自动检测值）: " MY_IP
+        echo -e "${GRAY}检测到本机出网IP：${AUTO_IP}${RESET}"
+        read -rp "$(echo -e "${CYAN}本机公网IP（回车使用上面这个）: ${RESET}")" MY_IP
         MY_IP=${MY_IP:-$AUTO_IP}
     else
-        read -rp "本机公网IP: " MY_IP
+        read -rp "$(echo -e "${CYAN}本机公网IP: ${RESET}")" MY_IP
     fi
 
     if [ "$ROLE" = "entry" ]; then
@@ -164,32 +155,32 @@ config_session() {
         REMOTE_WAN_IP="$ENTRY_IP"
     fi
 
-    # 自动算隧道IP
     calc_tunnel_ips
 
     echo
-    echo "[自动生成的隧道配置]"
-    echo "  本机身份:       $ROLE"
-    echo "  入口IP:         $ENTRY_IP"
-    echo "  高仿IP:         $GF_IP"
-    echo "  本机公网IP:     $LOCAL_WAN_IP"
-    echo "  对端公网IP:     $REMOTE_WAN_IP"
-    echo "  隧道名称:       $TUN_NAME"
-    echo "  本机隧道IP:     $LOCAL_TUN_IP"
-    echo "  对端隧道IP:     $REMOTE_TUN_IP"
-    echo "  策略路由表:     $TABLE_ID $TABLE_NAME"
-    echo "=========================================="
+    echo -e "${GOLD}当前会话配置：${RESET}"
+    echo -e "  身份:         ${CYAN}$ROLE${RESET}"
+    echo -e "  入口IP:       ${CYAN}$ENTRY_IP${RESET}"
+    echo -e "  高仿IP:       ${CYAN}$GF_IP${RESET}"
+    echo -e "  本机公网IP:   ${CYAN}$LOCAL_WAN_IP${RESET}"
+    echo -e "  对端公网IP:   ${CYAN}$REMOTE_WAN_IP${RESET}"
+    echo -e "  隧道名称:     ${CYAN}$TUN_NAME${RESET}"
+    echo -e "  本机隧道IP:   ${CYAN}$LOCAL_TUN_IP${RESET}"
+    echo -e "  对端隧道IP:   ${CYAN}$REMOTE_TUN_IP${RESET}"
+    echo -e "  路由表:       ${CYAN}$TABLE_ID $TABLE_NAME${RESET}"
+    echo
+    echo -e "${GRAY}提示：入口和高仿两边都用同一对【入口IP / 高仿IP】，隧道会自动对上。${RESET}"
     pause
 }
 
 check_base() {
     if [ -z "$ENTRY_IP" ] || [ -z "$GF_IP" ] || [ -z "$ROLE" ]; then
-        echo "[-] 还没配置会话参数，请先用菜单 1 设置入口IP/高仿IP/本机身份。"
+        echo -e "${RED}[-] 还没设置会话参数，请先执行菜单 1。${RESET}"
         pause
         return 1
     fi
     if [ -z "$LOCAL_WAN_IP" ] || [ -z "$REMOTE_WAN_IP" ] || [ -z "$LOCAL_TUN_IP" ] || [ -z "$REMOTE_TUN_IP" ]; then
-        echo "[-] 隧道IP/本机IP未就绪，请重新执行菜单 1。"
+        echo -e "${RED}[-] 隧道IP / 公网IP 未就绪，请重新执行菜单 1。${RESET}"
         pause
         return 1
     fi
@@ -199,108 +190,105 @@ check_base() {
 init_tunnel() {
     check_base || return
 
-    echo "[*] 加载 GRE 模块..."
+    echo -e "${GRAY}[*] 加载 GRE 模块...${RESET}"
     modprobe ip_gre 2>/dev/null || true
 
-    echo "[*] 删除可能存在的旧隧道: $TUN_NAME"
+    echo -e "${GRAY}[*] 清理旧隧道: ${TUN_NAME}${RESET}"
     ip tunnel del "$TUN_NAME" 2>/dev/null
 
-    echo "[*] 使用本机IP=$LOCAL_WAN_IP，对端IP=$REMOTE_WAN_IP 创建隧道 $TUN_NAME"
+    echo -e "${GRAY}[*] 创建隧道 ${TUN_NAME}（本机: $LOCAL_WAN_IP → 对端: $REMOTE_WAN_IP）${RESET}"
     ip tunnel add "$TUN_NAME" mode gre local "$LOCAL_WAN_IP" remote "$REMOTE_WAN_IP" ttl 255
 
-    echo "[*] 配置本机隧道IP: $LOCAL_TUN_IP/30"
+    echo -e "${GRAY}[*] 配置本机隧道IP: ${LOCAL_TUN_IP}/30${RESET}"
     ip addr flush dev "$TUN_NAME" 2>/dev/null
     ip addr add "$LOCAL_TUN_IP"/30 dev "$TUN_NAME"
 
-    echo "[*] 启用隧道网卡"
+    echo -e "${GRAY}[*] 启用隧道网卡${RESET}"
     ip link set "$TUN_NAME" up
 
-    echo "[*] 检查/添加路由表：$TABLE_ID $TABLE_NAME"
+    echo -e "${GRAY}[*] 检查/添加路由表: $TABLE_ID $TABLE_NAME${RESET}"
     if ! grep -qE "^[[:space:]]*$TABLE_ID[[:space:]]+$TABLE_NAME" /etc/iproute2/rt_tables; then
         echo "$TABLE_ID $TABLE_NAME" >> /etc/iproute2/rt_tables
     fi
 
-    echo "[*] 让 $TABLE_NAME 表默认走隧道"
+    echo -e "${GRAY}[*] 配置 $TABLE_NAME 表默认走隧道${RESET}"
     ip route flush table "$TABLE_NAME" 2>/dev/null
     ip route add default dev "$TUN_NAME" table "$TABLE_NAME"
 
     echo
-    echo "[+] 隧道已初始化。"
-    echo "[*] 入口机和高仿机都要各跑一次菜单 1 和菜单 2，"
-    echo "    然后可以互相 ping 对端隧道IP 测试："
-    echo "      本机隧道IP: $LOCAL_TUN_IP"
-    echo "      对端隧道IP: $REMOTE_TUN_IP"
+    echo -e "${GREEN}[+] 隧道已初始化，Enjoy 安静的带宽。${RESET}"
+    echo -e "${GRAY}建议：入口机和高仿机都执行一次菜单 1 & 2，然后互相 ping 对端隧道IP 测试连通。${RESET}"
     pause
 }
 
 start_clean_manual() {
     check_base || return
 
-    read -rp "要让哪个【入口IP】走高仿清洗？(回车默认=$ENTRY_IP): " TARGET
+    read -rp "$(echo -e "${CYAN}要让哪个入口IP走高仿清洗？(回车默认=$ENTRY_IP): ${RESET}")" TARGET
     TARGET=${TARGET:-$ENTRY_IP}
 
     if [ -z "$TARGET" ]; then
-        echo "[-] 入口IP不能为空。"
+        echo -e "${RED}[-] 入口IP不能为空。${RESET}"
         pause
         return
     fi
 
-    echo "[*] 给 $TARGET 添加策略路由：走表 $TABLE_NAME → 隧道 → 高仿"
+    echo -e "${GRAY}[*] 为 ${TARGET} 添加策略路由（走表 ${TABLE_NAME} → 隧道 → 高仿）...${RESET}"
     ip rule add to "$TARGET" lookup "$TABLE_NAME" priority 10000 2>/dev/null || true
 
-    echo "[+] 已开启：$TARGET 流量会通过隧道 $TUN_NAME → $GF_IP 清洗。"
+    echo -e "${GREEN}[+] 已开启：${TARGET} 的流量将通过隧道 ${TUN_NAME} → ${GF_IP} 清洗。${RESET}"
     pause
 }
 
 stop_clean_manual() {
     check_base || return
 
-    read -rp "要停止清洗的【入口IP】(回车默认=$ENTRY_IP): " TARGET
+    read -rp "$(echo -e "${CYAN}要停止清洗的入口IP？(回车默认=$ENTRY_IP): ${RESET}")" TARGET
     TARGET=${TARGET:-$ENTRY_IP}
 
     if [ -z "$TARGET" ]; then
-        echo "[-] 入口IP不能为空。"
+        echo -e "${RED}[-] 入口IP不能为空。${RESET}"
         pause
         return
     fi
 
-    echo "[*] 删除 $TARGET 的策略路由规则..."
+    echo -e "${GRAY}[*] 删除 ${TARGET} 的策略路由规则...${RESET}"
     ip rule del to "$TARGET" lookup "$TABLE_NAME" 2>/dev/null || true
 
-    echo "[+] 已停止：$TARGET 不再强制走高仿。"
+    echo -e "${GREEN}[+] 已停止：${TARGET} 不再强制走高仿，恢复直连。${RESET}"
     pause
 }
 
 show_status() {
-    echo "============== 当前会话状态 =============="
-    echo "  身份:           ${ROLE:-"(未设置)"}"
-    echo "  入口IP:         ${ENTRY_IP:-"(未设置)"}"
-    echo "  高仿IP:         ${GF_IP:-"(未设置)"}"
-    echo "  本机公网IP:     ${LOCAL_WAN_IP:-"(未设置)"}"
-    echo "  对端公网IP:     ${REMOTE_WAN_IP:-"(未设置)"}"
-    echo "  隧道名称:       $TUN_NAME"
-    echo "  本机隧道IP:     ${LOCAL_TUN_IP:-"(未生成)"}"
-    echo "  对端隧道IP:     ${REMOTE_TUN_IP:-"(未生成)"}"
-    echo "  路由表:         $TABLE_ID $TABLE_NAME"
-    echo "  监控网卡:       ${NET_IF:-"(未设置)"}"
-    echo "  阈值(Gbps):     ${THRESHOLD_G:-"(未设置)"}"
-    echo "=========================================="
+    echo -e "${GOLD}━━━━━━━━━━ 当前状态 ━━━━━━━━━━${RESET}"
+    echo -e "  身份:         ${CYAN}${ROLE:-"(未设置)"}${RESET}"
+    echo -e "  入口IP:       ${CYAN}${ENTRY_IP:-"(未设置)"}${RESET}"
+    echo -e "  高仿IP:       ${CYAN}${GF_IP:-"(未设置)"}${RESET}"
+    echo -e "  本机公网IP:   ${CYAN}${LOCAL_WAN_IP:-"(未设置)"}${RESET}"
+    echo -e "  对端公网IP:   ${CYAN}${REMOTE_WAN_IP:-"(未设置)"}${RESET}"
+    echo -e "  隧道名称:     ${CYAN}${TUN_NAME}${RESET}"
+    echo -e "  本机隧道IP:   ${CYAN}${LOCAL_TUN_IP:-"(未生成)"}${RESET}"
+    echo -e "  对端隧道IP:   ${CYAN}${REMOTE_TUN_IP:-"(未生成)"}${RESET}"
+    echo -e "  路由表:       ${CYAN}${TABLE_ID} ${TABLE_NAME}${RESET}"
+    echo -e "  监控网卡:     ${CYAN}${NET_IF:-"(未设置)"}${RESET}"
+    echo -e "  阈值(Gbps):   ${CYAN}${THRESHOLD_G:-"(未设置)"}${RESET}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo
 
-    echo "[*] ip tunnel show:"
+    echo -e "${GRAY}[*] ip tunnel show:${RESET}"
     ip tunnel show
 
     echo
-    echo "[*] ip addr show dev $TUN_NAME:"
-    ip addr show dev "$TUN_NAME" 2>/dev/null || echo "  设备 $TUN_NAME 暂未创建"
+    echo -e "${GRAY}[*] ip addr show dev ${TUN_NAME}:${RESET}"
+    ip addr show dev "$TUN_NAME" 2>/dev/null || echo -e "  设备 ${TUN_NAME} 暂未创建"
 
     echo
-    echo "[*] ip rule | grep $TABLE_NAME:"
-    ip rule | grep "$TABLE_NAME" || echo "  未找到使用 $TABLE_NAME 的规则"
+    echo -e "${GRAY}[*] ip rule | grep ${TABLE_NAME}:${RESET}"
+    ip rule | grep "$TABLE_NAME" || echo -e "  未找到使用 ${TABLE_NAME} 的规则"
 
     echo
-    echo "[*] ip route show table $TABLE_NAME:"
-    ip route show table "$TABLE_NAME" || echo "  路由表 $TABLE_NAME 暂为空"
+    echo -e "${GRAY}[*] ip route show table ${TABLE_NAME}:${RESET}"
+    ip route show table "$TABLE_NAME" || echo -e "  路由表 ${TABLE_NAME} 暂为空"
     echo
     pause
 }
@@ -309,38 +297,38 @@ auto_mode() {
     check_base || return
 
     if [ -z "$NET_IF" ]; then
-        echo "当前可用网卡："
+        echo -e "${GRAY}当前网卡（供参考）：${RESET}"
         ip -o link show | awk -F': ' '{print $2}' | grep -E '^(eth|ens|enp|eno|em)[0-9]+' || true
-        read -rp "用于对外的网卡名（例如 eth0 / ens33）: " NET_IF
+        read -rp "$(echo -e "${CYAN}对外网卡名（例如 eth0 / ens33）: ${RESET}")" NET_IF
     fi
 
     if [ -z "$THRESHOLD_G" ]; then
-        read -rp "配置多少 Gbps 时开始把入口IP打到高仿？(整数，例如 1 表示 1Gbps): " THRESHOLD_G
+        read -rp "$(echo -e "${CYAN}多少 Gbps 时自动把入口IP打到高仿？(整数，例如 1): ${RESET}")" THRESHOLD_G
     fi
 
     if [ -z "$NET_IF" ] || [ -z "$THRESHOLD_G" ]; then
-        echo "[-] 网卡 / 阈值 未设置完整。"
+        echo -e "${RED}[-] 网卡 / 阈值 未设置完整。${RESET}"
         pause
         return
     fi
 
     local THRESHOLD_MBPS=$((THRESHOLD_G * 1000))
 
-    read -rp "自动模式下要监控哪个入口IP？(回车默认=$ENTRY_IP): " TARGET
+    read -rp "$(echo -e "${CYAN}自动模式要保护哪个入口IP？(回车默认=$ENTRY_IP): ${RESET}")" TARGET
     TARGET=${TARGET:-$ENTRY_IP}
 
     if [ -z "$TARGET" ]; then
-        echo "[-] 入口IP不能为空。"
+        echo -e "${RED}[-] 入口IP不能为空。${RESET}"
         pause
         return
     fi
 
-    echo "[*] 自动模式启动："
-    echo "    网卡：$NET_IF"
-    echo "    阈值：${THRESHOLD_G} Gbps ≈ ${THRESHOLD_MBPS} Mbps"
-    echo "    被保护入口IP：$TARGET"
-    echo "    每 10 秒采样一次入站带宽，大于阈值则给 $TARGET 添加走高仿的策略路由。"
-    echo "    (Ctrl + C 可退出自动模式)"
+    echo -e "${GREEN}[*] 自动模式启动：${RESET}"
+    echo -e "    网卡：${CYAN}$NET_IF${RESET}"
+    echo -e "    阈值：${CYAN}${THRESHOLD_G} Gbps ≈ ${THRESHOLD_MBPS} Mbps${RESET}"
+    echo -e "    入口IP：${CYAN}$TARGET${RESET}"
+    echo -e "${GRAY}    每 10 秒统计一次入站流量，大于阈值就对该入口IP添加走高仿的策略路由。${RESET}"
+    echo -e "${GRAY}    Ctrl + C 退出自动模式 · Enjoy~${RESET}"
     pause
 
     local PREV_RX CUR_RX DIFF BPS MBPS
@@ -352,13 +340,13 @@ auto_mode() {
         DIFF=$((CUR_RX - PREV_RX))
         PREV_RX=$CUR_RX
 
-        BPS=$((DIFF * 8 / 10))          # 10秒内平均bit/s
+        BPS=$((DIFF * 8 / 10))
         MBPS=$((BPS / 1000000))
 
-        echo "[AUTO] $(date '+%F %T') 最近10秒 $NET_IF 入站约 ${MBPS} Mbps"
+        echo -e "${GRAY}[AUTO] $(date '+%F %T') 最近10秒 ${NET_IF} 入站 ≈ ${MBPS} Mbps${RESET}"
 
         if [ "$MBPS" -ge "$THRESHOLD_MBPS" ]; then
-            echo "[AUTO] 触发阈值(${THRESHOLD_MBPS}Mbps)，对 $TARGET 启用走高仿清洗..."
+            echo -e "${GOLD}[AUTO] 触发阈值，正在将 ${TARGET} 打到高仿清洗...${RESET}"
             ip rule add to "$TARGET" lookup "$TABLE_NAME" priority 10000 2>/dev/null || true
         fi
     done
@@ -367,18 +355,19 @@ auto_mode() {
 menu() {
     while true; do
         clear
-        echo "=========================================="
-        echo "           高仿一键助手（单脚本）         "
-        echo "=========================================="
-        echo "1) 设置本次会话参数（入口IP / 高仿IP / 身份）"
-        echo "2) 建立/重建隧道（本机 ↔ 对端）"
-        echo "3) 手动：让某个入口IP 走高仿清洗"
-        echo "4) 手动：停止某个入口IP 的高仿清洗"
-        echo "5) 自动模式：按网卡流量(Gbps)自动打到高仿"
-        echo "6) 查看当前隧道 / 路由 / 参数状态"
-        echo "0) 退出（所有参数只在本次运行中有效）"
-        echo "------------------------------------------"
-        read -rp "请选择: " CH
+        echo -e "${GOLD}━━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━━${RESET}"
+        echo -e "${CYAN}${BOLD}        Traffic In · Garbage Out${RESET}"
+        echo -e "${GRAY}          Enjoy your clean bandwidth.${RESET}"
+        echo -e "${GOLD}────────────────────────────────────────${RESET}"
+        echo -e "  ${GOLD}1${RESET}）设置会话参数  ${GRAY}(入口IP / 高仿IP / 本机身份)${RESET}"
+        echo -e "  ${GOLD}2${RESET}）建立 / 重建隧道  ${GRAY}(本机 ↔ 对端)${RESET}"
+        echo -e "  ${GOLD}3${RESET}）手动开启清洗      ${GRAY}(让入口IP 走高仿)${RESET}"
+        echo -e "  ${GOLD}4${RESET}）手动停止清洗      ${GRAY}(入口IP 恢复直连)${RESET}"
+        echo -e "  ${GOLD}5${RESET}）自动模式          ${GRAY}(按网卡流量 Gbps 自动打高仿)${RESET}"
+        echo -e "  ${GOLD}6${RESET}）状态查看          ${GRAY}(隧道 / 路由 / 参数)${RESET}"
+        echo -e "  ${GOLD}0${RESET}）退出控制台        ${GRAY}(参数不会落盘，安全退出)${RESET}"
+        echo -e "${GOLD}────────────────────────────────────────${RESET}"
+        read -rp "$(echo -e "${CYAN}请选择: ${RESET}")" CH
 
         case "$CH" in
             1) config_session ;;
@@ -387,8 +376,8 @@ menu() {
             4) stop_clean_manual ;;
             5) auto_mode ;;
             6) show_status ;;
-            0) exit 0 ;;
-            *) echo "无效选择"; pause ;;
+            0) echo -e "${GREEN}Bye~ Enjoy your clean traffic.${RESET}"; exit 0 ;;
+            *) echo -e "${RED}[-] 无效选择。${RESET}"; pause ;;
         esac
     done
 }
