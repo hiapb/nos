@@ -1,6 +1,6 @@
 #!/bin/bash
 # =====================================================
-# 高仿一键助手（单脚本版 · Black&Gold · Enjoy）
+# 高仿一键助手（单脚本版）
 # 入口 / 高仿 通用
 # =====================================================
 
@@ -38,19 +38,22 @@ require_root() {
 }
 
 pause() {
-    read -rp "$(echo -e "${GRAY}按回车继续 · Enjoy clean traffic...${RESET}")" _
+    read -rp "$(echo -e "${GRAY}按回车继续${RESET}")" _
 }
 
+# 自动探测本机出网IP
 auto_detect_ip() {
     ip route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}'
 }
 
+# IPv4 -> int
 ip2int() {
     local IFS=.
     read -r a b c d <<< "$1"
     echo $(( (a<<24) + (b<<16) + (c<<8) + d ))
 }
 
+# int -> IPv4
 int2ip() {
     local ip dec=$1
     for _ in {1..4}; do
@@ -115,25 +118,25 @@ calc_tunnel_ips() {
 }
 
 config_session() {
-    echo -e "${GOLD}━━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━━${RESET}"
-    echo -e "${CYAN}${BOLD}           会话参数设置${RESET}"
+    echo -e "${GOLD}━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━${RESET}"
+    echo -e "${CYAN}${BOLD}             会话参数设置${RESET}"
     echo
 
-    echo -e "${CYAN}本机身份？${RESET}"
-    echo -e "  ${GOLD}1${RESET}）入口服务器  ${GRAY}(对外那台，可能被打)${RESET}"
-    echo -e "  ${GOLD}2${RESET}）高仿服务器  ${GRAY}(高防那台，负责清洗)${RESET}"
+    echo -e "${CYAN}本机身份${RESET}"
+    echo -e "  ${GOLD}1${RESET}）入口服务器"
+    echo -e "  ${GOLD}2${RESET}）高仿服务器"
     read -rp "$(echo -e "${CYAN}请选择 1 或 2: ${RESET}")" r
     case "$r" in
         1) ROLE="entry" ;;
         2) ROLE="gf" ;;
-        *) echo -e "${RED}[-] 选择无效。${RESET}"; pause; return ;;
+        *) echo -e "${RED}[-] 选择无效${RESET}"; pause; return ;;
     esac
 
-    read -rp "$(echo -e "${CYAN}入口IP（被攻击那个公网IP）: ${RESET}")" ENTRY_IP
-    read -rp "$(echo -e "${CYAN}高仿IP（高防服务器公网IP）: ${RESET}")" GF_IP
+    read -rp "$(echo -e "${CYAN}入口IP: ${RESET}")" ENTRY_IP
+    read -rp "$(echo -e "${CYAN}高仿IP: ${RESET}")" GF_IP
 
     if [ -z "$ENTRY_IP" ] || [ -z "$GF_IP" ]; then
-        echo -e "${RED}[-] 入口IP / 高仿IP 不能为空。${RESET}"
+        echo -e "${RED}[-] 入口IP / 高仿IP 不能为空${RESET}"
         pause
         return
     fi
@@ -141,7 +144,7 @@ config_session() {
     AUTO_IP=$(auto_detect_ip)
     if [ -n "$AUTO_IP" ]; then
         echo -e "${GRAY}检测到本机出网IP：${AUTO_IP}${RESET}"
-        read -rp "$(echo -e "${CYAN}本机公网IP（回车使用上面这个）: ${RESET}")" MY_IP
+        read -rp "$(echo -e "${CYAN}本机公网IP（回车使用检测到的）: ${RESET}")" MY_IP
         MY_IP=${MY_IP:-$AUTO_IP}
     else
         read -rp "$(echo -e "${CYAN}本机公网IP: ${RESET}")" MY_IP
@@ -158,7 +161,7 @@ config_session() {
     calc_tunnel_ips
 
     echo
-    echo -e "${GOLD}当前会话配置：${RESET}"
+    echo -e "${GOLD}当前会话配置${RESET}"
     echo -e "  身份:         ${CYAN}$ROLE${RESET}"
     echo -e "  入口IP:       ${CYAN}$ENTRY_IP${RESET}"
     echo -e "  高仿IP:       ${CYAN}$GF_IP${RESET}"
@@ -169,18 +172,17 @@ config_session() {
     echo -e "  对端隧道IP:   ${CYAN}$REMOTE_TUN_IP${RESET}"
     echo -e "  路由表:       ${CYAN}$TABLE_ID $TABLE_NAME${RESET}"
     echo
-    echo -e "${GRAY}提示：入口和高仿两边都用同一对【入口IP / 高仿IP】，隧道会自动对上。${RESET}"
     pause
 }
 
 check_base() {
     if [ -z "$ENTRY_IP" ] || [ -z "$GF_IP" ] || [ -z "$ROLE" ]; then
-        echo -e "${RED}[-] 还没设置会话参数，请先执行菜单 1。${RESET}"
+        echo -e "${RED}[-] 还没设置会话参数，请先执行菜单 1${RESET}"
         pause
         return 1
     fi
     if [ -z "$LOCAL_WAN_IP" ] || [ -z "$REMOTE_WAN_IP" ] || [ -z "$LOCAL_TUN_IP" ] || [ -z "$REMOTE_TUN_IP" ]; then
-        echo -e "${RED}[-] 隧道IP / 公网IP 未就绪，请重新执行菜单 1。${RESET}"
+        echo -e "${RED}[-] 隧道参数未就绪，请重新执行菜单 1${RESET}"
         pause
         return 1
     fi
@@ -216,46 +218,45 @@ init_tunnel() {
     ip route add default dev "$TUN_NAME" table "$TABLE_NAME"
 
     echo
-    echo -e "${GREEN}[+] 隧道已初始化，Enjoy 安静的带宽。${RESET}"
-    echo -e "${GRAY}建议：入口机和高仿机都执行一次菜单 1 & 2，然后互相 ping 对端隧道IP 测试连通。${RESET}"
+    echo -e "${GREEN}[+] 隧道已初始化${RESET}"
     pause
 }
 
 start_clean_manual() {
     check_base || return
 
-    read -rp "$(echo -e "${CYAN}要让哪个入口IP走高仿清洗？(回车默认=$ENTRY_IP): ${RESET}")" TARGET
+    read -rp "$(echo -e "${CYAN}要走高仿清洗的入口IP（回车默认当前入口IP）: ${RESET}")" TARGET
     TARGET=${TARGET:-$ENTRY_IP}
 
     if [ -z "$TARGET" ]; then
-        echo -e "${RED}[-] 入口IP不能为空。${RESET}"
+        echo -e "${RED}[-] 入口IP不能为空${RESET}"
         pause
         return
     fi
 
-    echo -e "${GRAY}[*] 为 ${TARGET} 添加策略路由（走表 ${TABLE_NAME} → 隧道 → 高仿）...${RESET}"
+    echo -e "${GRAY}[*] 为 ${TARGET} 添加策略路由${RESET}"
     ip rule add to "$TARGET" lookup "$TABLE_NAME" priority 10000 2>/dev/null || true
 
-    echo -e "${GREEN}[+] 已开启：${TARGET} 的流量将通过隧道 ${TUN_NAME} → ${GF_IP} 清洗。${RESET}"
+    echo -e "${GREEN}[+] 已开启：${TARGET} 流量将通过隧道 ${TUN_NAME} → ${GF_IP} 清洗${RESET}"
     pause
 }
 
 stop_clean_manual() {
     check_base || return
 
-    read -rp "$(echo -e "${CYAN}要停止清洗的入口IP？(回车默认=$ENTRY_IP): ${RESET}")" TARGET
+    read -rp "$(echo -e "${CYAN}要停止清洗的入口IP（回车默认当前入口IP）: ${RESET}")" TARGET
     TARGET=${TARGET:-$ENTRY_IP}
 
     if [ -z "$TARGET" ]; then
-        echo -e "${RED}[-] 入口IP不能为空。${RESET}"
+        echo -e "${RED}[-] 入口IP不能为空${RESET}"
         pause
         return
     fi
 
-    echo -e "${GRAY}[*] 删除 ${TARGET} 的策略路由规则...${RESET}"
+    echo -e "${GRAY}[*] 删除 ${TARGET} 的策略路由规则${RESET}"
     ip rule del to "$TARGET" lookup "$TABLE_NAME" 2>/dev/null || true
 
-    echo -e "${GREEN}[+] 已停止：${TARGET} 不再强制走高仿，恢复直连。${RESET}"
+    echo -e "${GREEN}[+] 已停止：${TARGET} 不再强制走高仿${RESET}"
     pause
 }
 
@@ -270,9 +271,9 @@ show_status() {
     echo -e "  本机隧道IP:   ${CYAN}${LOCAL_TUN_IP:-"(未生成)"}${RESET}"
     echo -e "  对端隧道IP:   ${CYAN}${REMOTE_TUN_IP:-"(未生成)"}${RESET}"
     echo -e "  路由表:       ${CYAN}${TABLE_ID} ${TABLE_NAME}${RESET}"
-    echo -e "  监控网卡:     ${CYAN}${NET_IF:-"(未设置)"}${RESET}"
+    echo- e "  监控网卡:     ${CYAN}${NET_IF:-"(未设置)"}${RESET}"
     echo -e "  阈值(Gbps):   ${CYAN}${THRESHOLD_G:-"(未设置)"}${RESET}"
-    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo
 
     echo -e "${GRAY}[*] ip tunnel show:${RESET}"
@@ -297,38 +298,38 @@ auto_mode() {
     check_base || return
 
     if [ -z "$NET_IF" ]; then
-        echo -e "${GRAY}当前网卡（供参考）：${RESET}"
+        echo -e "${GRAY}当前网卡列表：${RESET}"
         ip -o link show | awk -F': ' '{print $2}' | grep -E '^(eth|ens|enp|eno|em)[0-9]+' || true
-        read -rp "$(echo -e "${CYAN}对外网卡名（例如 eth0 / ens33）: ${RESET}")" NET_IF
+        read -rp "$(echo -e "${CYAN}对外网卡名: ${RESET}")" NET_IF
     fi
 
     if [ -z "$THRESHOLD_G" ]; then
-        read -rp "$(echo -e "${CYAN}多少 Gbps 时自动把入口IP打到高仿？(整数，例如 1): ${RESET}")" THRESHOLD_G
+        read -rp "$(echo -e "${CYAN}触发清洗阈值（Gbps）: ${RESET}")" THRESHOLD_G
     fi
 
     if [ -z "$NET_IF" ] || [ -z "$THRESHOLD_G" ]; then
-        echo -e "${RED}[-] 网卡 / 阈值 未设置完整。${RESET}"
+        echo -e "${RED}[-] 网卡 / 阈值 未设置完整${RESET}"
         pause
         return
     fi
 
     local THRESHOLD_MBPS=$((THRESHOLD_G * 1000))
 
-    read -rp "$(echo -e "${CYAN}自动模式要保护哪个入口IP？(回车默认=$ENTRY_IP): ${RESET}")" TARGET
+    read -rp "$(echo -e "${CYAN}自动模式保护的入口IP（回车默认当前入口IP）: ${RESET}")" TARGET
     TARGET=${TARGET:-$ENTRY_IP}
 
     if [ -z "$TARGET" ]; then
-        echo -e "${RED}[-] 入口IP不能为空。${RESET}"
+        echo -e "${RED}[-] 入口IP不能为空${RESET}"
         pause
         return
     fi
 
-    echo -e "${GREEN}[*] 自动模式启动：${RESET}"
-    echo -e "    网卡：${CYAN}$NET_IF${RESET}"
-    echo -e "    阈值：${CYAN}${THRESHOLD_G} Gbps ≈ ${THRESHOLD_MBPS} Mbps${RESET}"
-    echo -e "    入口IP：${CYAN}$TARGET${RESET}"
-    echo -e "${GRAY}    每 10 秒统计一次入站流量，大于阈值就对该入口IP添加走高仿的策略路由。${RESET}"
-    echo -e "${GRAY}    Ctrl + C 退出自动模式 · Enjoy~${RESET}"
+    echo -e "${GREEN}[*] 自动模式已启动${RESET}"
+    echo -e "    网卡: ${CYAN}$NET_IF${RESET}"
+    echo -e "    阈值: ${CYAN}${THRESHOLD_G} Gbps ≈ ${THRESHOLD_MBPS} Mbps${RESET}"
+    echo -e "    入口IP: ${CYAN}$TARGET${RESET}"
+    echo -e "${GRAY}    每 10 秒统计一次入站流量，大于阈值则对该入口IP添加走高仿的策略路由${RESET}"
+    echo -e "${GRAY}    Ctrl + C 退出自动模式${RESET}"
     pause
 
     local PREV_RX CUR_RX DIFF BPS MBPS
@@ -346,7 +347,7 @@ auto_mode() {
         echo -e "${GRAY}[AUTO] $(date '+%F %T') 最近10秒 ${NET_IF} 入站 ≈ ${MBPS} Mbps${RESET}"
 
         if [ "$MBPS" -ge "$THRESHOLD_MBPS" ]; then
-            echo -e "${GOLD}[AUTO] 触发阈值，正在将 ${TARGET} 打到高仿清洗...${RESET}"
+            echo -e "${GOLD}[AUTO] 触发阈值，已对 ${TARGET} 启用走高仿清洗${RESET}"
             ip rule add to "$TARGET" lookup "$TABLE_NAME" priority 10000 2>/dev/null || true
         fi
     done
@@ -355,18 +356,17 @@ auto_mode() {
 menu() {
     while true; do
         clear
-        echo -e "${GOLD}━━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━━${RESET}"
-        echo -e "${CYAN}${BOLD}        Traffic In · Garbage Out${RESET}"
-        echo -e "${GRAY}          Enjoy your clean bandwidth.${RESET}"
-        echo -e "${GOLD}────────────────────────────────────────${RESET}"
-        echo -e "  ${GOLD}1${RESET}）设置会话参数  ${GRAY}(入口IP / 高仿IP / 本机身份)${RESET}"
-        echo -e "  ${GOLD}2${RESET}）建立 / 重建隧道  ${GRAY}(本机 ↔ 对端)${RESET}"
-        echo -e "  ${GOLD}3${RESET}）手动开启清洗      ${GRAY}(让入口IP 走高仿)${RESET}"
-        echo -e "  ${GOLD}4${RESET}）手动停止清洗      ${GRAY}(入口IP 恢复直连)${RESET}"
-        echo -e "  ${GOLD}5${RESET}）自动模式          ${GRAY}(按网卡流量 Gbps 自动打高仿)${RESET}"
-        echo -e "  ${GOLD}6${RESET}）状态查看          ${GRAY}(隧道 / 路由 / 参数)${RESET}"
-        echo -e "  ${GOLD}0${RESET}）退出控制台        ${GRAY}(参数不会落盘，安全退出)${RESET}"
-        echo -e "${GOLD}────────────────────────────────────────${RESET}"
+        echo -e "${GOLD}━━━━━━━━━━ 高仿 DDoS 控制台 ━━━━━━━━━━${RESET}"
+        echo -e "${CYAN}${BOLD}             流量清洗面板${RESET}"
+        echo -e "${GOLD}────────────────────────────────────${RESET}"
+        echo -e "  ${GOLD}1${RESET}）设置会话参数"
+        echo -e "  ${GOLD}2${RESET}）建立 / 重建隧道"
+        echo -e "  ${GOLD}3${RESET}）手动开启清洗"
+        echo -e "  ${GOLD}4${RESET}）手动停止清洗"
+        echo -e "  ${GOLD}5${RESET}）自动清洗模式"
+        echo -e "  ${GOLD}6${RESET}）查看当前状态"
+        echo -e "  ${GOLD}0${RESET}）退出"
+        echo -e "${GOLD}────────────────────────────────────${RESET}"
         read -rp "$(echo -e "${CYAN}请选择: ${RESET}")" CH
 
         case "$CH" in
@@ -376,8 +376,8 @@ menu() {
             4) stop_clean_manual ;;
             5) auto_mode ;;
             6) show_status ;;
-            0) echo -e "${GREEN}Bye~ Enjoy your clean traffic.${RESET}"; exit 0 ;;
-            *) echo -e "${RED}[-] 无效选择。${RESET}"; pause ;;
+            0) echo -e "${GREEN}已退出${RESET}"; exit 0 ;;
+            *) echo -e "${RED}[-] 无效选择${RESET}"; pause ;;
         esac
     done
 }
